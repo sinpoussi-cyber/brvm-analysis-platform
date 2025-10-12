@@ -4,7 +4,7 @@
 
 from datetime import datetime, timedelta
 from typing import Optional
-from jose import JWTError, jwt
+import jwt
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -26,15 +26,11 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 # ==============================================================================
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """
-    Vérifie si un mot de passe correspond au hash
-    """
+    """Vérifie si un mot de passe correspond au hash"""
     return pwd_context.verify(plain_password, hashed_password)
 
 def get_password_hash(password: str) -> str:
-    """
-    Hash un mot de passe
-    """
+    """Hash un mot de passe"""
     return pwd_context.hash(password)
 
 # ==============================================================================
@@ -42,9 +38,7 @@ def get_password_hash(password: str) -> str:
 # ==============================================================================
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """
-    Crée un token JWT d'accès
-    """
+    """Crée un token JWT d'accès"""
     to_encode = data.copy()
     
     if expires_delta:
@@ -58,9 +52,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return encoded_jwt
 
 def create_refresh_token(data: dict) -> str:
-    """
-    Crée un token JWT de rafraîchissement
-    """
+    """Crée un token JWT de rafraîchissement"""
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     
@@ -70,9 +62,7 @@ def create_refresh_token(data: dict) -> str:
     return encoded_jwt
 
 def decode_token(token: str) -> TokenData:
-    """
-    Décode un token JWT
-    """
+    """Décode un token JWT"""
     try:
         payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
         user_id: str = payload.get("sub")
@@ -86,10 +76,15 @@ def decode_token(token: str) -> TokenData:
         
         return TokenData(user_id=UUID(user_id), email=email)
     
-    except JWTError:
+    except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token invalide ou expiré"
+            detail="Token expiré"
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token invalide"
         )
 
 # ==============================================================================
@@ -100,10 +95,7 @@ async def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
-    """
-    Récupère l'utilisateur actuel depuis le token JWT
-    À utiliser comme dépendance FastAPI
-    """
+    """Récupère l'utilisateur actuel depuis le token JWT"""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Impossible de valider les credentials",
@@ -114,23 +106,44 @@ async def get_current_user(
         token_data = decode_token(token)
         
         # Récupérer l'utilisateur depuis la DB
-        user = db.execute(
-            "SELECT * FROM users WHERE id = %s AND is_active = true",
-            (str(token_data.user_id),)
-        ).fetchone()
+        import psycopg2
+        conn = psycopg2.connect(
+            dbname=settings.DB_NAME,
+            user=settings.DB_USER,
+            password=settings.DB_PASSWORD,
+            host=settings.DB_HOST,
+            port=settings.DB_PORT
+        )
+        
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, email, user_type, first_name, last_name, is_active FROM users WHERE id = %s AND is_active = true",
+                (str(token_data.user_id),)
+            )
+            user = cur.fetchone()
+        
+        conn.close()
         
         if user is None:
             raise credentials_exception
         
-        return user
+        # Créer un objet utilisateur simple
+        class User:
+            def __init__(self, data):
+                self.id = data[0]
+                self.email = data[1]
+                self.user_type = data[2]
+                self.first_name = data[3]
+                self.last_name = data[4]
+                self.is_active = data[5]
+        
+        return User(user)
     
     except Exception:
         raise credentials_exception
 
 async def get_current_active_user(current_user = Depends(get_current_user)):
-    """
-    Vérifie que l'utilisateur est actif
-    """
+    """Vérifie que l'utilisateur est actif"""
     if not current_user.is_active:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -143,9 +156,7 @@ async def get_current_active_user(current_user = Depends(get_current_user)):
 # ==============================================================================
 
 def check_user_type(user, allowed_types: list):
-    """
-    Vérifie que l'utilisateur a le bon type
-    """
+    """Vérifie que l'utilisateur a le bon type"""
     if user.user_type not in allowed_types:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
