@@ -4,9 +4,12 @@ services:
     env: python
     region: frankfurt
     plan: free
-    buildCommand: pip install -r requirements.txt
+    runtime: python
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.10
       - key: DB_HOST
         value: aws-1-eu-west-1.pooler.supabase.com
       - key: DB_PORT
@@ -16,7 +19,7 @@ services:
       - key: DB_USER
         value: postgres.mdibxftmrdrdhwxgqpkq
       - key: DB_PASSWORD
-        sync: false  # À configurer manuellement dans Render Dashboard
+        sync: false
       - key: SECRET_KEY
         generateValue: true
       - key: DEBUG
