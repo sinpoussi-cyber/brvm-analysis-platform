@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: brvm-api
+    env: python
+    region: frankfurt
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DB_HOST
+        value: aws-1-eu-west-1.pooler.supabase.com
+      - key: DB_PORT
+        value: 5432
+      - key: DB_NAME
+        value: postgres
+      - key: DB_USER
+        value: postgres.mdibxftmrdrdhwxgqpkq
+      - key: DB_PASSWORD
+        sync: false  # À configurer manuellement dans Render Dashboard
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: False
