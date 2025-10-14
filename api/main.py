@@ -4,18 +4,13 @@
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 import time
 
 from api.config import settings
-from api.database import engine, Base
 from api.routers import auth, companies, market, analysis, predictions, portfolios, watchlists, alerts
-
-# Créer les tables si elles n'existent pas
-Base.metadata.create_all(bind=engine)
 
 # Rate limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -65,9 +60,6 @@ app.include_router(alerts.router, prefix="/api/v1/alerts", tags=["Alerts"])
 # Route racine
 @app.get("/", tags=["Root"])
 async def root():
-    """
-    Point d'entrée de l'API
-    """
     return {
         "name": "BRVM Analysis Platform API",
         "version": "1.0.0",
@@ -79,22 +71,15 @@ async def root():
 # Health check
 @app.get("/health", tags=["Health"])
 async def health_check():
-    """
-    Vérification de l'état de santé de l'API
-    """
     return {
         "status": "healthy",
-        "timestamp": time.time(),
-        "database": "connected"
+        "timestamp": time.time()
     }
 
 # Route pour tester l'authentification
 @app.get("/api/v1/test", tags=["Test"])
 @limiter.limit("10/minute")
 async def test_endpoint(request: Request):
-    """
-    Endpoint de test avec rate limiting
-    """
     return {
         "message": "API fonctionnelle!",
         "timestamp": time.time()
@@ -102,9 +87,4 @@ async def test_endpoint(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "api.main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
-    )
+    uvicorn.run("api.main:app", host="0.0.0.0", port=8000, reload=True)
