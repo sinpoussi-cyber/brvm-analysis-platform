@@ -8,11 +8,10 @@ import jwt
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
 from uuid import UUID
+import psycopg2
 
 from api.config import settings
-from api.database import get_db
 from models.schemas import TokenData
 
 # Configuration du hashing de mots de passe
@@ -88,13 +87,26 @@ def decode_token(token: str) -> TokenData:
         )
 
 # ==============================================================================
+# CLASSE UTILISATEUR
+# ==============================================================================
+
+class User:
+    """Classe représentant un utilisateur"""
+    def __init__(self, data):
+        self.id = data[0]
+        self.email = data[1]
+        self.user_type = data[2]
+        self.first_name = data[3]
+        self.last_name = data[4]
+        self.is_active = data[5]
+        self.is_verified = data[6] if len(data) > 6 else False
+        self.created_at = data[7] if len(data) > 7 else None
+
+# ==============================================================================
 # DÉPENDANCES FASTAPI
 # ==============================================================================
 
-async def get_current_user(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-):
+async def get_current_user(token: str = Depends(oauth2_scheme)):
     """Récupère l'utilisateur actuel depuis le token JWT"""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -106,7 +118,6 @@ async def get_current_user(
         token_data = decode_token(token)
         
         # Récupérer l'utilisateur depuis la DB
-        import psycopg2
         conn = psycopg2.connect(
             dbname=settings.DB_NAME,
             user=settings.DB_USER,
@@ -115,34 +126,31 @@ async def get_current_user(
             port=settings.DB_PORT
         )
         
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT id, email, user_type, first_name, last_name, is_active FROM users WHERE id = %s AND is_active = true",
-                (str(token_data.user_id),)
-            )
-            user = cur.fetchone()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, email, user_type, first_name, last_name, is_active, is_verified, created_at
+                    FROM users 
+                    WHERE id = %s AND is_active = true
+                """, (str(token_data.user_id),))
+                
+                user_data = cur.fetchone()
+            
+            if user_data is None:
+                raise credentials_exception
+            
+            return User(user_data)
         
-        conn.close()
-        
-        if user is None:
-            raise credentials_exception
-        
-        # Créer un objet utilisateur simple
-        class User:
-            def __init__(self, data):
-                self.id = data[0]
-                self.email = data[1]
-                self.user_type = data[2]
-                self.first_name = data[3]
-                self.last_name = data[4]
-                self.is_active = data[5]
-        
-        return User(user)
+        finally:
+            conn.close()
     
-    except Exception:
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Erreur lors de la récupération de l'utilisateur: {str(e)}")
         raise credentials_exception
 
-async def get_current_active_user(current_user = Depends(get_current_user)):
+async def get_current_active_user(current_user: User = Depends(get_current_user)):
     """Vérifie que l'utilisateur est actif"""
     if not current_user.is_active:
         raise HTTPException(
@@ -155,7 +163,7 @@ async def get_current_active_user(current_user = Depends(get_current_user)):
 # FONCTIONS D'AUTORISATION
 # ==============================================================================
 
-def check_user_type(user, allowed_types: list):
+def check_user_type(user: User, allowed_types: list):
     """Vérifie que l'utilisateur a le bon type"""
     if user.user_type not in allowed_types:
         raise HTTPException(
@@ -163,3 +171,18 @@ def check_user_type(user, allowed_types: list):
             detail="Accès interdit pour ce type d'utilisateur"
         )
     return True
+
+def require_user_type(allowed_types: list):
+    """
+    Décorateur de dépendance pour restreindre l'accès par type d'utilisateur
+    
+    Usage:
+        @router.get("/admin")
+        async def admin_endpoint(current_user = Depends(require_user_type(["admin"]))):
+            ...
+    """
+    async def user_type_checker(current_user: User = Depends(get_current_user)):
+        check_user_type(current_user, allowed_types)
+        return current_user
+    
+    return user_type_checker
