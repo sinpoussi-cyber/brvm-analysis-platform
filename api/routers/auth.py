@@ -4,11 +4,9 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
-from sqlalchemy.orm import Session
 from datetime import datetime
 import psycopg2
 
-from api.database import get_db
 from api.config import settings
 from models.schemas import UserRegister, UserLogin, Token, UserResponse
 from utils.security import (
@@ -26,7 +24,7 @@ router = APIRouter()
 # ==============================================================================
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def register(user_data: UserRegister, db: Session = Depends(get_db)):
+async def register(user_data: UserRegister):
     """
     Inscription d'un nouvel utilisateur
     """
@@ -94,6 +92,9 @@ async def register(user_data: UserRegister, db: Session = Depends(get_db)):
                 created_at=user[7]
             )
     
+    except HTTPException:
+        conn.rollback()
+        raise
     except Exception as e:
         conn.rollback()
         raise HTTPException(
