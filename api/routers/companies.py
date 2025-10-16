@@ -1,23 +1,32 @@
 # ==============================================================================
-# AJOUTS AU ROUTER: COMPANIES - Sociétés comparables
-# ==============================================================================
-# Ajouter ces fonctions au fichier api/routers/companies.py existant
-
-# ==============================================================================
-# SOCIÉTÉS COMPARABLES (PEERS)
+# ROUTER: COMPANIES - Sociétés cotées (VERSION COMPLÈTE)
 # ==============================================================================
 
-@router.get("/{symbol}/comparable")
-async def get_comparable_companies(
-    symbol: str,
-    limit: int = Query(default=5, ge=1, le=20),
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from typing import List, Optional
+import psycopg2
+
+from api.config import settings
+from models.schemas import Company, CompanyDetail
+from utils.security import get_current_user
+
+router = APIRouter()
+
+# ==============================================================================
+# LISTE DES SOCIÉTÉS
+# ==============================================================================
+
+@router.get("/", response_model=List[CompanyDetail])
+async def get_companies(
+    sector: Optional[str] = None,
+    search: Optional[str] = None,
     current_user = Depends(get_current_user)
 ):
     """
-    Trouver les sociétés comparables (même secteur, capitalisation similaire)
+    Récupérer la liste des 46 sociétés cotées à la BRVM
     
-    - **symbol**: Symbole de la société de référence
-    - **limit**: Nombre de sociétés comparables à retourner
+    - **sector**: Filtrer par secteur (optionnel)
+    - **search**: Rechercher par symbole ou nom (optionnel)
     """
     conn = psycopg2.connect(
         dbname=settings.DB_NAME,
@@ -29,137 +38,83 @@ async def get_comparable_companies(
     
     try:
         with conn.cursor() as cur:
-            # Récupérer les infos de la société de référence
-            cur.execute("""
-                SELECT c.sector, hd.price, hd.volume
+            query = """
+                SELECT 
+                    c.id,
+                    c.symbol,
+                    c.name,
+                    c.sector,
+                    c.created_at,
+                    hd.price as current_price,
+                    (hd.price - hd_prev.price) as price_change,
+                    CASE 
+                        WHEN hd_prev.price > 0 
+                        THEN ((hd.price - hd_prev.price) / hd_prev.price * 100)
+                        ELSE 0 
+                    END as price_change_percent,
+                    hd.volume
                 FROM companies c
                 LEFT JOIN LATERAL (
                     SELECT price, volume FROM historical_data
                     WHERE company_id = c.id
                     ORDER BY trade_date DESC
                     LIMIT 1
-                ) hd ON TRUE
-                WHERE c.symbol = %s
-            """, (symbol.upper(),))
+                ) hd ON true
+                LEFT JOIN LATERAL (
+                    SELECT price FROM historical_data
+                    WHERE company_id = c.id
+                    ORDER BY trade_date DESC
+                    OFFSET 1
+                    LIMIT 1
+                ) hd_prev ON true
+                WHERE 1=1
+            """
             
-            ref_company = cur.fetchone()
+            params = []
             
-            if not ref_company:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Société {symbol} non trouvée"
-                )
+            if sector:
+                query += " AND c.sector = %s"
+                params.append(sector)
             
-            ref_sector, ref_price, ref_volume = ref_company
+            if search:
+                query += " AND (c.symbol ILIKE %s OR c.name ILIKE %s)"
+                params.extend([f"%{search}%", f"%{search}%"])
             
-            if not ref_sector:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Secteur non défini pour {symbol}"
-                )
+            query += " ORDER BY c.symbol"
             
-            # Trouver les sociétés comparables
-            # Critères: même secteur + prix/volume similaires
-            cur.execute("""
-                WITH company_metrics AS (
-                    SELECT 
-                        c.id,
-                        c.symbol,
-                        c.name,
-                        c.sector,
-                        hd_current.price as current_price,
-                        hd_current.volume,
-                        hd_prev.price as prev_price,
-                        ((hd_current.price - hd_prev.price) / hd_prev.price * 100) as price_change_percent,
-                        ta.mm_decision,
-                        ta.rsi_decision,
-                        ABS(hd_current.price - %s) as price_diff,
-                        ABS(COALESCE(hd_current.volume, 0) - COALESCE(%s, 0)) as volume_diff
-                    FROM companies c
-                    LEFT JOIN LATERAL (
-                        SELECT price, volume FROM historical_data
-                        WHERE company_id = c.id
-                        ORDER BY trade_date DESC
-                        LIMIT 1
-                    ) hd_current ON TRUE
-                    LEFT JOIN LATERAL (
-                        SELECT price FROM historical_data
-                        WHERE company_id = c.id
-                        ORDER BY trade_date DESC
-                        OFFSET 1
-                        LIMIT 1
-                    ) hd_prev ON TRUE
-                    LEFT JOIN LATERAL (
-                        SELECT mm_decision, rsi_decision FROM technical_analysis ta2
-                        JOIN historical_data hd2 ON ta2.historical_data_id = hd2.id
-                        WHERE hd2.company_id = c.id
-                        ORDER BY hd2.trade_date DESC
-                        LIMIT 1
-                    ) ta ON TRUE
-                    WHERE c.sector = %s
-                    AND c.symbol != %s
-                    AND hd_current.price IS NOT NULL
-                )
-                SELECT 
-                    symbol,
-                    name,
-                    sector,
-                    current_price,
-                    volume,
-                    price_change_percent,
-                    mm_decision,
-                    rsi_decision,
-                    price_diff,
-                    volume_diff,
-                    (price_diff + (volume_diff / 1000.0)) as similarity_score
-                FROM company_metrics
-                ORDER BY similarity_score ASC
-                LIMIT %s
-            """, (ref_price or 0, ref_volume or 0, ref_sector, symbol.upper(), limit))
+            cur.execute(query, params)
+            companies = cur.fetchall()
             
-            comparable = cur.fetchall()
+            result = []
+            for company in companies:
+                result.append(CompanyDetail(
+                    id=company[0],
+                    symbol=company[1],
+                    name=company[2],
+                    sector=company[3],
+                    created_at=company[4],
+                    current_price=company[5],
+                    price_change=company[6],
+                    price_change_percent=company[7],
+                    volume=company[8]
+                ))
             
-            return {
-                "reference_company": symbol,
-                "reference_sector": ref_sector,
-                "reference_price": float(ref_price) if ref_price else None,
-                "comparable_companies": [
-                    {
-                        "symbol": c[0],
-                        "name": c[1],
-                        "sector": c[2],
-                        "current_price": float(c[3]),
-                        "volume": c[4],
-                        "price_change_percent": float(c[5]) if c[5] else 0,
-                        "mm_decision": c[6],
-                        "rsi_decision": c[7],
-                        "similarity_score": float(c[10])
-                    }
-                    for c in comparable
-                ]
-            }
+            return result
     
     finally:
         conn.close()
 
-
 # ==============================================================================
-# ANALYSE COMPARATIVE DÉTAILLÉE
+# DÉTAILS D'UNE SOCIÉTÉ
 # ==============================================================================
 
-@router.get("/{symbol}/compare-with/{peer_symbol}")
-async def compare_two_companies(
+@router.get("/{symbol}", response_model=CompanyDetail)
+async def get_company(
     symbol: str,
-    peer_symbol: str,
-    period: Optional[str] = Query(default="3M", regex="^(1M|3M|6M|1Y)$"),
     current_user = Depends(get_current_user)
 ):
     """
-    Comparer deux sociétés en détail
-    
-    - **symbol**: Première société
-    - **peer_symbol**: Société à comparer
-    - **period**: Période de comparaison (1M, 3M, 6M, 1Y)
+    Récupérer les détails d'une société par son symbole
     """
     conn = psycopg2.connect(
         dbname=settings.DB_NAME,
@@ -170,104 +125,248 @@ async def compare_two_companies(
     )
     
     try:
-        period_days = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365}
-        days = period_days[period]
-        
         with conn.cursor() as cur:
-            # Données comparatives pour les deux sociétés
-            query = """
-                WITH company_stats AS (
-                    SELECT 
-                        c.symbol,
-                        c.name,
-                        c.sector,
-                        (SELECT price FROM historical_data 
-                         WHERE company_id = c.id 
-                         AND trade_date >= CURRENT_DATE - INTERVAL '%s days'
-                         ORDER BY trade_date ASC LIMIT 1) as start_price,
-                        (SELECT price FROM historical_data 
-                         WHERE company_id = c.id 
-                         ORDER BY trade_date DESC LIMIT 1) as current_price,
-                        (SELECT AVG(volume) FROM historical_data 
-                         WHERE company_id = c.id 
-                         AND trade_date >= CURRENT_DATE - INTERVAL '%s days') as avg_volume,
-                        (SELECT mm_decision FROM technical_analysis ta
-                         JOIN historical_data hd ON ta.historical_data_id = hd.id
-                         WHERE hd.company_id = c.id
-                         ORDER BY hd.trade_date DESC LIMIT 1) as mm_decision,
-                        (SELECT rsi FROM technical_analysis ta
-                         JOIN historical_data hd ON ta.historical_data_id = hd.id
-                         WHERE hd.company_id = c.id
-                         ORDER BY hd.trade_date DESC LIMIT 1) as rsi
-                    FROM companies c
-                    WHERE c.symbol IN (%s, %s)
-                )
+            cur.execute("""
                 SELECT 
-                    symbol,
-                    name,
-                    sector,
-                    start_price,
-                    current_price,
-                    ((current_price - start_price) / start_price * 100) as performance,
-                    avg_volume,
-                    mm_decision,
-                    rsi
-                FROM company_stats;
-            """
+                    c.id,
+                    c.symbol,
+                    c.name,
+                    c.sector,
+                    c.created_at,
+                    hd.price as current_price,
+                    (hd.price - hd_prev.price) as price_change,
+                    CASE 
+                        WHEN hd_prev.price > 0 
+                        THEN ((hd.price - hd_prev.price) / hd_prev.price * 100)
+                        ELSE 0 
+                    END as price_change_percent,
+                    hd.volume
+                FROM companies c
+                LEFT JOIN LATERAL (
+                    SELECT price, volume FROM historical_data
+                    WHERE company_id = c.id
+                    ORDER BY trade_date DESC
+                    LIMIT 1
+                ) hd ON true
+                LEFT JOIN LATERAL (
+                    SELECT price FROM historical_data
+                    WHERE company_id = c.id
+                    ORDER BY trade_date DESC
+                    OFFSET 1
+                    LIMIT 1
+                ) hd_prev ON true
+                WHERE c.symbol = %s
+            """, (symbol.upper(),))
             
-            cur.execute(query, (days, days, symbol.upper(), peer_symbol.upper()))
-            results = cur.fetchall()
+            company = cur.fetchone()
             
-            if len(results) < 2:
+            if not company:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Une ou plusieurs sociétés introuvables"
+                    detail=f"Société {symbol} non trouvée"
                 )
             
-            company1 = {
-                "symbol": results[0][0],
-                "name": results[0][1],
-                "sector": results[0][2],
-                "start_price": float(results[0][3]) if results[0][3] else 0,
-                "current_price": float(results[0][4]) if results[0][4] else 0,
-                "performance": float(results[0][5]) if results[0][5] else 0,
-                "avg_volume": int(results[0][6]) if results[0][6] else 0,
-                "mm_decision": results[0][7],
-                "rsi": float(results[0][8]) if results[0][8] else None
-            }
+            return CompanyDetail(
+                id=company[0],
+                symbol=company[1],
+                name=company[2],
+                sector=company[3],
+                created_at=company[4],
+                current_price=company[5],
+                price_change=company[6],
+                price_change_percent=company[7],
+                volume=company[8]
+            )
+    
+    finally:
+        conn.close()
+
+# ==============================================================================
+# LISTE DES SECTEURS
+# ==============================================================================
+
+@router.get("/sectors/list")
+async def get_sectors(current_user = Depends(get_current_user)):
+    """
+    Récupérer la liste des secteurs avec nombre de sociétés
+    """
+    conn = psycopg2.connect(
+        dbname=settings.DB_NAME,
+        user=settings.DB_USER,
+        password=settings.DB_PASSWORD,
+        host=settings.DB_HOST,
+        port=settings.DB_PORT
+    )
+    
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT 
+                    sector,
+                    COUNT(*) as company_count
+                FROM companies
+                WHERE sector IS NOT NULL
+                GROUP BY sector
+                ORDER BY sector
+            """)
             
-            company2 = {
-                "symbol": results[1][0],
-                "name": results[1][1],
-                "sector": results[1][2],
-                "start_price": float(results[1][3]) if results[1][3] else 0,
-                "current_price": float(results[1][4]) if results[1][4] else 0,
-                "performance": float(results[1][5]) if results[1][5] else 0,
-                "avg_volume": int(results[1][6]) if results[1][6] else 0,
-                "mm_decision": results[1][7],
-                "rsi": float(results[1][8]) if results[1][8] else None
-            }
+            sectors = cur.fetchall()
             
-            # Analyse comparative
-            performance_diff = company1["performance"] - company2["performance"]
-            volume_diff_pct = ((company1["avg_volume"] - company2["avg_volume"]) / 
-                              company2["avg_volume"] * 100) if company2["avg_volume"] > 0 else 0
+            return [
+                {
+                    "sector": sector[0],
+                    "company_count": sector[1]
+                }
+                for sector in sectors
+            ]
+    
+    finally:
+        conn.close()
+
+# ==============================================================================
+# NOUVEAU : SOCIÉTÉS COMPARABLES
+# ==============================================================================
+
+@router.get("/{symbol}/comparable")
+async def get_comparable_companies(
+    symbol: str,
+    limit: int = Query(default=5, ge=1, le=10),
+    current_user = Depends(get_current_user)
+):
+    """
+    Récupérer les sociétés comparables (même secteur)
+    
+    Critères de similarité :
+    - Même secteur
+    - Taille de capitalisation similaire (± 50%)
+    - Performance similaire (± 30%)
+    """
+    conn = psycopg2.connect(
+        dbname=settings.DB_NAME,
+        user=settings.DB_USER,
+        password=settings.DB_PASSWORD,
+        host=settings.DB_HOST,
+        port=settings.DB_PORT
+    )
+    
+    try:
+        with conn.cursor() as cur:
+            # Récupérer les infos de la société cible
+            cur.execute("""
+                SELECT 
+                    c.sector,
+                    hd_current.price as current_price,
+                    hd_current.volume,
+                    (hd_current.price - hd_prev.price) / hd_prev.price * 100 as change_percent
+                FROM companies c
+                LEFT JOIN LATERAL (
+                    SELECT price, volume FROM historical_data
+                    WHERE company_id = c.id
+                    ORDER BY trade_date DESC
+                    LIMIT 1
+                ) hd_current ON true
+                LEFT JOIN LATERAL (
+                    SELECT price FROM historical_data
+                    WHERE company_id = c.id
+                    ORDER BY trade_date DESC
+                    OFFSET 1
+                    LIMIT 1
+                ) hd_prev ON true
+                WHERE c.symbol = %s
+            """, (symbol.upper(),))
+            
+            target = cur.fetchone()
+            
+            if not target:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Société {symbol} non trouvée"
+                )
+            
+            target_sector, target_price, target_volume, target_change = target
+            
+            # Récupérer les sociétés comparables
+            cur.execute("""
+                SELECT 
+                    c.symbol,
+                    c.name,
+                    c.sector,
+                    hd_current.price as current_price,
+                    (hd_current.price - hd_prev.price) / hd_prev.price * 100 as change_percent,
+                    hd_current.volume,
+                    ta.mm_decision,
+                    ta.rsi_decision,
+                    -- Score de similarité (0-100)
+                    (
+                        -- Bonus si même secteur
+                        CASE WHEN c.sector = %s THEN 40 ELSE 0 END +
+                        -- Similarité de prix (max 30 points)
+                        CASE 
+                            WHEN hd_current.price BETWEEN %s * 0.5 AND %s * 1.5 
+                            THEN 30 - ABS(hd_current.price - %s) / %s * 30
+                            ELSE 0 
+                        END +
+                        -- Similarité de performance (max 30 points)
+                        CASE 
+                            WHEN (hd_current.price - hd_prev.price) / hd_prev.price * 100 
+                                 BETWEEN %s * 0.7 AND %s * 1.3
+                            THEN 30
+                            ELSE 0
+                        END
+                    ) as similarity_score
+                FROM companies c
+                LEFT JOIN LATERAL (
+                    SELECT price, volume FROM historical_data
+                    WHERE company_id = c.id
+                    ORDER BY trade_date DESC
+                    LIMIT 1
+                ) hd_current ON true
+                LEFT JOIN LATERAL (
+                    SELECT price FROM historical_data
+                    WHERE company_id = c.id
+                    ORDER BY trade_date DESC
+                    OFFSET 1
+                    LIMIT 1
+                ) hd_prev ON true
+                LEFT JOIN LATERAL (
+                    SELECT mm_decision, rsi_decision FROM technical_analysis ta
+                    JOIN historical_data hd ON ta.historical_data_id = hd.id
+                    WHERE hd.company_id = c.id
+                    ORDER BY hd.trade_date DESC
+                    LIMIT 1
+                ) ta ON true
+                WHERE c.symbol != %s
+                AND c.sector IS NOT NULL
+                AND hd_current.price IS NOT NULL
+                ORDER BY similarity_score DESC
+                LIMIT %s
+            """, (
+                target_sector,  # Pour le bonus secteur
+                target_price, target_price, target_price, target_price,  # Pour similarité prix
+                target_change, target_change,  # Pour similarité performance
+                symbol.upper(),  # Exclure la société elle-même
+                limit
+            ))
+            
+            comparables = cur.fetchall()
             
             return {
-                "period": period,
-                "company1": company1,
-                "company2": company2,
-                "comparison": {
-                    "performance_difference": performance_diff,
-                    "better_performer": company1["symbol"] if performance_diff > 0 else company2["symbol"],
-                    "volume_difference_percent": volume_diff_pct,
-                    "same_sector": company1["sector"] == company2["sector"],
-                    "recommendation": (
-                        f"{company1['symbol']} surperforme {company2['symbol']} de {abs(performance_diff):.2f}%"
-                        if performance_diff > 0
-                        else f"{company2['symbol']} surperforme {company1['symbol']} de {abs(performance_diff):.2f}%"
-                    )
-                }
+                "symbol": symbol.upper(),
+                "sector": target_sector,
+                "comparable_companies": [
+                    {
+                        "symbol": c[0],
+                        "name": c[1],
+                        "sector": c[2],
+                        "current_price": float(c[3]) if c[3] else 0,
+                        "change_percent": round(float(c[4]), 2) if c[4] else 0,
+                        "volume": c[5],
+                        "mm_decision": c[6],
+                        "rsi_decision": c[7],
+                        "similarity_score": round(float(c[8]), 1)
+                    }
+                    for c in comparables
+                ]
             }
     
     finally:
