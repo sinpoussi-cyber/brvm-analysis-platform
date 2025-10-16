@@ -1,25 +1,15 @@
 # ==============================================================================
 # ROUTER: USERS - Préférences utilisateur
 # ==============================================================================
-# IMPORTANT: Ajouter les schémas suivants à models/schemas.py
-#
-# from typing import List
-# 
-# class UserPreferences(BaseModel):
-#     user_id: UUID
-#     theme: str = "light"
-#     language: str = "fr"
-#     currency: str = "XOF"
-#     email_notifications: bool = True
-#     push_notifications: bool = True
-#     default_chart_period: str = "1M"
-#     favorite_sectors: List[str] = []
-#     risk_profile: str = "moderate"
-#     investment_horizon: str = "medium"
-#     created_at: datetime
-#     updated_at: datetime
-#     
-#     model_config = ConfigDict(from_attributes=True
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Optional
+import psycopg2
+import json
+
+from api.config import settings
+from models.schemas import UserPreferences, UserPreferencesUpdate
+from utils.security import get_current_user
 
 router = APIRouter()
 
@@ -42,18 +32,62 @@ async def get_user_preferences(current_user = Depends(get_current_user)):
     
     try:
         with conn.cursor() as cur:
+            # Vérifier si la table user_preferences existe
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'user_preferences'
+                );
+            """)
+            
+            table_exists = cur.fetchone()[0]
+            
+            if not table_exists:
+                # Créer la table si elle n'existe pas
+                cur.execute("""
+                    CREATE TABLE user_preferences (
+                        id SERIAL PRIMARY KEY,
+                        user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+                        theme VARCHAR(20) DEFAULT 'light',
+                        language VARCHAR(10) DEFAULT 'fr',
+                        notifications_enabled BOOLEAN DEFAULT true,
+                        email_notifications BOOLEAN DEFAULT true,
+                        sms_notifications BOOLEAN DEFAULT false,
+                        push_notifications BOOLEAN DEFAULT true,
+                        default_currency VARCHAR(10) DEFAULT 'XOF',
+                        favorite_sectors TEXT[] DEFAULT '{}',
+                        watchlist_view VARCHAR(20) DEFAULT 'grid',
+                        chart_type VARCHAR(20) DEFAULT 'candlestick',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    
+                    CREATE INDEX idx_user_preferences_user ON user_preferences(user_id);
+                """)
+                conn.commit()
+            
+            # Récupérer ou créer les préférences
+            cur.execute("""
+                INSERT INTO user_preferences (user_id)
+                VALUES (%s)
+                ON CONFLICT (user_id) DO NOTHING
+                RETURNING id;
+            """, (str(current_user.id),))
+            conn.commit()
+            
+            # Récupérer les préférences
             cur.execute("""
                 SELECT 
                     theme,
                     language,
-                    currency,
+                    notifications_enabled,
                     email_notifications,
+                    sms_notifications,
                     push_notifications,
-                    default_chart_period,
+                    default_currency,
                     favorite_sectors,
-                    risk_profile,
-                    investment_horizon,
-                    created_at,
+                    watchlist_view,
+                    chart_type,
                     updated_at
                 FROM user_preferences
                 WHERE user_id = %s
@@ -62,43 +96,33 @@ async def get_user_preferences(current_user = Depends(get_current_user)):
             prefs = cur.fetchone()
             
             if not prefs:
-                # Créer des préférences par défaut si n'existent pas
-                cur.execute("""
-                    INSERT INTO user_preferences (user_id)
-                    VALUES (%s)
-                    RETURNING 
-                        theme, language, currency, email_notifications,
-                        push_notifications, default_chart_period, favorite_sectors,
-                        risk_profile, investment_horizon, created_at, updated_at
-                """, (str(current_user.id),))
-                
-                prefs = cur.fetchone()
-                conn.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Préférences non trouvées"
+                )
             
             return UserPreferences(
-                user_id=current_user.id,
                 theme=prefs[0],
                 language=prefs[1],
-                currency=prefs[2],
+                notifications_enabled=prefs[2],
                 email_notifications=prefs[3],
-                push_notifications=prefs[4],
-                default_chart_period=prefs[5],
-                favorite_sectors=prefs[6] if prefs[6] else [],
-                risk_profile=prefs[7],
-                investment_horizon=prefs[8],
-                created_at=prefs[9],
+                sms_notifications=prefs[4],
+                push_notifications=prefs[5],
+                default_currency=prefs[6],
+                favorite_sectors=prefs[7] or [],
+                watchlist_view=prefs[8],
+                chart_type=prefs[9],
                 updated_at=prefs[10]
             )
     
     finally:
         conn.close()
 
-
 # ==============================================================================
 # METTRE À JOUR LES PRÉFÉRENCES
 # ==============================================================================
 
-@router.put("/preferences")
+@router.put("/preferences", response_model=UserPreferences)
 async def update_user_preferences(
     preferences: UserPreferencesUpdate,
     current_user = Depends(get_current_user)
@@ -116,45 +140,49 @@ async def update_user_preferences(
     
     try:
         with conn.cursor() as cur:
-            # Construire dynamiquement la requête UPDATE
+            # Construire la requête dynamiquement
             update_fields = []
-            update_values = []
+            params = []
             
             if preferences.theme is not None:
                 update_fields.append("theme = %s")
-                update_values.append(preferences.theme)
+                params.append(preferences.theme)
             
             if preferences.language is not None:
                 update_fields.append("language = %s")
-                update_values.append(preferences.language)
+                params.append(preferences.language)
             
-            if preferences.currency is not None:
-                update_fields.append("currency = %s")
-                update_values.append(preferences.currency)
+            if preferences.notifications_enabled is not None:
+                update_fields.append("notifications_enabled = %s")
+                params.append(preferences.notifications_enabled)
             
             if preferences.email_notifications is not None:
                 update_fields.append("email_notifications = %s")
-                update_values.append(preferences.email_notifications)
+                params.append(preferences.email_notifications)
+            
+            if preferences.sms_notifications is not None:
+                update_fields.append("sms_notifications = %s")
+                params.append(preferences.sms_notifications)
             
             if preferences.push_notifications is not None:
                 update_fields.append("push_notifications = %s")
-                update_values.append(preferences.push_notifications)
+                params.append(preferences.push_notifications)
             
-            if preferences.default_chart_period is not None:
-                update_fields.append("default_chart_period = %s")
-                update_values.append(preferences.default_chart_period)
+            if preferences.default_currency is not None:
+                update_fields.append("default_currency = %s")
+                params.append(preferences.default_currency)
             
             if preferences.favorite_sectors is not None:
                 update_fields.append("favorite_sectors = %s")
-                update_values.append(preferences.favorite_sectors)
+                params.append(preferences.favorite_sectors)
             
-            if preferences.risk_profile is not None:
-                update_fields.append("risk_profile = %s")
-                update_values.append(preferences.risk_profile)
+            if preferences.watchlist_view is not None:
+                update_fields.append("watchlist_view = %s")
+                params.append(preferences.watchlist_view)
             
-            if preferences.investment_horizon is not None:
-                update_fields.append("investment_horizon = %s")
-                update_values.append(preferences.investment_horizon)
+            if preferences.chart_type is not None:
+                update_fields.append("chart_type = %s")
+                params.append(preferences.chart_type)
             
             if not update_fields:
                 raise HTTPException(
@@ -162,29 +190,53 @@ async def update_user_preferences(
                     detail="Aucune préférence à mettre à jour"
                 )
             
+            # Ajouter updated_at
             update_fields.append("updated_at = CURRENT_TIMESTAMP")
-            update_values.append(str(current_user.id))
+            params.append(str(current_user.id))
             
             query = f"""
                 UPDATE user_preferences
                 SET {', '.join(update_fields)}
                 WHERE user_id = %s
+                RETURNING 
+                    theme, language, notifications_enabled,
+                    email_notifications, sms_notifications, push_notifications,
+                    default_currency, favorite_sectors, watchlist_view,
+                    chart_type, updated_at
             """
             
-            cur.execute(query, update_values)
+            cur.execute(query, params)
+            updated = cur.fetchone()
             conn.commit()
             
-            return {"message": "Préférences mises à jour avec succès"}
+            if not updated:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Préférences non trouvées"
+                )
+            
+            return UserPreferences(
+                theme=updated[0],
+                language=updated[1],
+                notifications_enabled=updated[2],
+                email_notifications=updated[3],
+                sms_notifications=updated[4],
+                push_notifications=updated[5],
+                default_currency=updated[6],
+                favorite_sectors=updated[7] or [],
+                watchlist_view=updated[8],
+                chart_type=updated[9],
+                updated_at=updated[10]
+            )
     
     finally:
         conn.close()
-
 
 # ==============================================================================
 # RÉINITIALISER LES PRÉFÉRENCES
 # ==============================================================================
 
-@router.post("/preferences/reset")
+@router.post("/preferences/reset", response_model=UserPreferences)
 async def reset_user_preferences(current_user = Depends(get_current_user)):
     """
     Réinitialiser les préférences aux valeurs par défaut
@@ -204,20 +256,45 @@ async def reset_user_preferences(current_user = Depends(get_current_user)):
                 SET 
                     theme = 'light',
                     language = 'fr',
-                    currency = 'XOF',
+                    notifications_enabled = true,
                     email_notifications = true,
+                    sms_notifications = false,
                     push_notifications = true,
-                    default_chart_period = '1M',
-                    favorite_sectors = ARRAY[]::VARCHAR[],
-                    risk_profile = 'moderate',
-                    investment_horizon = 'medium',
+                    default_currency = 'XOF',
+                    favorite_sectors = '{}',
+                    watchlist_view = 'grid',
+                    chart_type = 'candlestick',
                     updated_at = CURRENT_TIMESTAMP
                 WHERE user_id = %s
+                RETURNING 
+                    theme, language, notifications_enabled,
+                    email_notifications, sms_notifications, push_notifications,
+                    default_currency, favorite_sectors, watchlist_view,
+                    chart_type, updated_at
             """, (str(current_user.id),))
             
+            reset = cur.fetchone()
             conn.commit()
             
-            return {"message": "Préférences réinitialisées aux valeurs par défaut"}
+            if not reset:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Préférences non trouvées"
+                )
+            
+            return UserPreferences(
+                theme=reset[0],
+                language=reset[1],
+                notifications_enabled=reset[2],
+                email_notifications=reset[3],
+                sms_notifications=reset[4],
+                push_notifications=reset[5],
+                default_currency=reset[6],
+                favorite_sectors=reset[7] or [],
+                watchlist_view=reset[8],
+                chart_type=reset[9],
+                updated_at=reset[10]
+            )
     
     finally:
         conn.close()
