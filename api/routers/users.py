@@ -1,15 +1,25 @@
 # ==============================================================================
 # ROUTER: USERS - Préférences utilisateur
 # ==============================================================================
-
-from fastapi import APIRouter, Depends, HTTPException, status
-from typing import Optional, List
-import psycopg2
-import json
-
-from api.config import settings
-from models.schemas import UserPreferences, UserPreferencesUpdate
-from utils.security import get_current_user
+# IMPORTANT: Ajouter les schémas suivants à models/schemas.py
+#
+# from typing import List
+# 
+# class UserPreferences(BaseModel):
+#     user_id: UUID
+#     theme: str = "light"
+#     language: str = "fr"
+#     currency: str = "XOF"
+#     email_notifications: bool = True
+#     push_notifications: bool = True
+#     default_chart_period: str = "1M"
+#     favorite_sectors: List[str] = []
+#     risk_profile: str = "moderate"
+#     investment_horizon: str = "medium"
+#     created_at: datetime
+#     updated_at: datetime
+#     
+#     model_config = ConfigDict(from_attributes=True
 
 router = APIRouter()
 
