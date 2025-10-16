@@ -1,5 +1,5 @@
 # ==============================================================================
-# BRVM ANALYSIS PLATFORM API - Point d'entrée principal
+# BRVM ANALYSIS PLATFORM API - Point d'entrée principal (MISE À JOUR)
 # ==============================================================================
 
 from fastapi import FastAPI, Request
@@ -10,7 +10,7 @@ from slowapi.errors import RateLimitExceeded
 import time
 
 from api.config import settings
-from api.routers import auth, companies, market, analysis, predictions, portfolios, watchlists, alerts
+from api.routers import auth, companies, market, analysis, predictions, portfolios, watchlists, alerts, users
 
 # Rate limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -56,6 +56,7 @@ app.include_router(predictions.router, prefix="/api/v1/predictions", tags=["Pred
 app.include_router(portfolios.router, prefix="/api/v1/portfolios", tags=["Portfolios"])
 app.include_router(watchlists.router, prefix="/api/v1/watchlists", tags=["Watchlists"])
 app.include_router(alerts.router, prefix="/api/v1/alerts", tags=["Alerts"])
+app.include_router(users.router, prefix="/api/v1/users", tags=["Users"])  # ✅ NOUVEAU
 
 # Route racine
 @app.get("/", tags=["Root"])
@@ -65,7 +66,14 @@ async def root():
         "version": "1.0.0",
         "status": "operational",
         "documentation": "/docs",
-        "health": "/health"
+        "health": "/health",
+        "new_features": [
+            "GET /api/v1/market/sectors/performance - Performance par secteur",
+            "GET /api/v1/companies/{symbol}/comparable - Sociétés comparables",
+            "GET /api/v1/users/preferences - Préférences utilisateur",
+            "PUT /api/v1/users/preferences - Modifier préférences",
+            "POST /api/v1/users/preferences/reset - Réinitialiser préférences"
+        ]
     }
 
 # Health check
